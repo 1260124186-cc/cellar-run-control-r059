@@ -2,7 +2,6 @@ package service
 
 import (
 	"strings"
-	"time"
 
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/clock"
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/domain"
@@ -10,9 +9,8 @@ import (
 )
 
 type Service struct {
-	store               *storage.Store
-	clock               clock.Clock
-	reservationSequence int64
+	store *storage.Store
+	clock clock.Clock
 }
 
 func New(store *storage.Store, timeSource clock.Clock) *Service {
@@ -45,9 +43,4 @@ func generatedRunCode() (string, error) {
 	}
 	suffix := strings.ToUpper(strings.TrimPrefix(value, "run_"))
 	return "RUN-" + suffix, nil
-}
-
-func reservationTimePointer(value time.Time) *time.Time {
-	stamp := value.UTC()
-	return &stamp
 }

@@ -82,26 +82,33 @@ func (s *Service) ReserveRun(
 				"planned_volume_liters", "exceeds vessel capacity")
 		}
 		now := s.clock.Now()
-		expiresAt := now.Add(domain.VesselReservationWindow)
-		reclaimed := vessel.ReservationExpired(now)
-		s.reservationSequence++
-		generation := s.reservationSequence
-		if reclaimed {
-			if vessel.ActiveRunID != nil {
-				if previous, found := snapshot.Runs[*vessel.ActiveRunID]; found {
-					previous.ReservationGeneration = vessel.ReservationGeneration + 1
-					previous.ReservationExpiresAt = reservationTimePointer(expiresAt)
-					snapshot.Runs[previous.ID] = previous.Clone()
-				}
+
+		// An expired reservation can be reclaimed. The previous holder must be
+		// fully released first: its run returns to planned and loses every link
+		// to the vessel, so it can never start against the new generation.
+		if vessel.ReservationExpired(now) && vessel.ActiveRunID != nil {
+			previousID := *vessel.ActiveRunID
+			previous, found := snapshot.Runs[previousID]
+			if !found {
+				return domain.NewError(domain.CodeRunNotFound,
+					"vessel points to a run that was not found")
+			}
+			if err := previous.ReleaseVesselReservation(now); err != nil {
+				return err
+			}
+			snapshot.Runs[previous.ID] = previous.Clone()
+			// Re-reserving its own expired reservation: keep the local copy in
+			// sync with the released state so the new reservation can proceed.
+			if previousID == run.ID {
+				run = previous
 			}
 		}
+
+		expiresAt := now.Add(domain.VesselReservationWindow)
 		if err := vessel.Reserve(run.ID, expiresAt, now); err != nil {
 			return err
 		}
-		if reclaimed {
-			generation = vessel.ReservationGeneration
-			s.reservationSequence = generation
-		}
+		generation := vessel.ReservationGeneration
 		if err := run.ReserveVessel(vessel.ID, generation, expiresAt, now); err != nil {
 			return err
 		}
@@ -139,9 +146,13 @@ func (s *Service) StartRun(
 			return domain.NewError(domain.CodeVesselNotFound, "vessel was not found")
 		}
 		now := s.clock.Now()
-		if s.reservationSequence != run.ReservationGeneration {
+		// Ownership is decided entirely by persisted state: the vessel must
+		// point back at this run, both sides must share the same reservation
+		// generation, and neither reservation may have expired. This survives
+		// restarts and is untouched by failed reservation attempts.
+		if vessel.ActiveRunID == nil || *vessel.ActiveRunID != run.ID {
 			return domain.NewError(domain.CodeRevisionConflict,
-				"reservation generation is no longer current")
+				"vessel is no longer reserved by this run")
 		}
 		if run.ReservationGeneration != vessel.ReservationGeneration {
 			return domain.NewError(domain.CodeRevisionConflict,
