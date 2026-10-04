@@ -82,28 +82,42 @@ func (s *Service) ReserveRun(
 				"planned_volume_liters", "exceeds vessel capacity")
 		}
 		now := s.clock.Now()
-		expiresAt := now.Add(domain.VesselReservationWindow)
-		reclaimed := vessel.ReservationExpired(now)
-		s.reservationSequence++
-		generation := s.reservationSequence
-		if reclaimed {
-			if vessel.ActiveRunID != nil {
-				if previous, found := snapshot.Runs[*vessel.ActiveRunID]; found {
-					previous.ReservationGeneration = vessel.ReservationGeneration + 1
-					previous.ReservationExpiresAt = reservationTimePointer(expiresAt)
-					snapshot.Runs[previous.ID] = previous.Clone()
-				}
+
+		// If the current holder's reservation has expired, end that
+		// reservation completely before handing the vessel to anyone else.
+		// Every change below is made on copies of the snapshot aggregates and
+		// is written back only after every domain transition succeeds, so a
+		// failed request never changes the run, vessel, versions, or times.
+		var previous *domain.FermentationRun
+		if vessel.ReservationExpired(now) && vessel.ActiveRunID != nil {
+			if *vessel.ActiveRunID == run.ID {
+				// The requesting run itself owns the expired reservation; it
+				// is no longer planned, so reserving again must fail and the
+				// operator recovers by aborting the run first.
+				return domain.NewError(domain.CodeRunState,
+					"only a planned run can reserve a vessel")
 			}
+			held, found := snapshot.Runs[*vessel.ActiveRunID]
+			if !found {
+				return domain.NewError(domain.CodeRunNotFound,
+					"vessel references a run that was not found")
+			}
+			if err := held.ReleaseVesselReservation(now); err != nil {
+				return err
+			}
+			previous = &held
 		}
+
+		expiresAt := now.Add(domain.VesselReservationWindow)
 		if err := vessel.Reserve(run.ID, expiresAt, now); err != nil {
 			return err
 		}
-		if reclaimed {
-			generation = vessel.ReservationGeneration
-			s.reservationSequence = generation
-		}
-		if err := run.ReserveVessel(vessel.ID, generation, expiresAt, now); err != nil {
+		if err := run.ReserveVessel(vessel.ID, vessel.ReservationGeneration,
+			expiresAt, now); err != nil {
 			return err
+		}
+		if previous != nil {
+			snapshot.Runs[previous.ID] = previous.Clone()
 		}
 		snapshot.Runs[id] = run.Clone()
 		snapshot.Vessels[vessel.ID] = vessel
@@ -139,9 +153,9 @@ func (s *Service) StartRun(
 			return domain.NewError(domain.CodeVesselNotFound, "vessel was not found")
 		}
 		now := s.clock.Now()
-		if s.reservationSequence != run.ReservationGeneration {
-			return domain.NewError(domain.CodeRevisionConflict,
-				"reservation generation is no longer current")
+		if vessel.ActiveRunID == nil || *vessel.ActiveRunID != run.ID {
+			return domain.NewError(domain.CodeVesselState,
+				"vessel is not reserved by this run")
 		}
 		if run.ReservationGeneration != vessel.ReservationGeneration {
 			return domain.NewError(domain.CodeRevisionConflict,

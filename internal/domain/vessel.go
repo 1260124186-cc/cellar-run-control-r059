@@ -64,13 +64,17 @@ func (v *Vessel) StartRun(runID string, generation int64, now time.Time) error {
 	if v.State != VesselReserved {
 		return NewError(CodeVesselState, "vessel is not reserved by this run")
 	}
+	if v.ActiveRunID == nil || *v.ActiveRunID != runID {
+		return NewError(CodeVesselState, "vessel is not reserved by this run")
+	}
+	if v.ReservationGeneration != generation {
+		return NewError(CodeRevisionConflict,
+			"run and vessel reservation generations do not match")
+	}
 	if v.ReservationExpiresAt == nil || !v.ReservationExpiresAt.After(now.UTC()) {
 		return NewError(CodeVesselState, "vessel is not reserved by this run")
 	}
-	run := runID
 	v.State = VesselInUse
-	v.ActiveRunID = &run
-	v.ReservationGeneration = generation
 	v.ReservationExpiresAt = nil
 	v.UpdatedAt = now.UTC()
 	v.Version++
